@@ -1,0 +1,125 @@
+
+
+https://blog.csdn.net/sinat_29581293/article/details/70214436
+jstack命令查看线程堆栈信息时可能会看到的线程的几种状态：
+	New: 当线程对象创建时存在的状态，此时线程不可能执行；
+	Runnable：当调用thread.start()后，线程变成为Runnable状态。只要得到CPU，就可以执行；
+	Running：线程正在执行；
+	Waiting：执行thread.join()或在锁对象调用obj.wait()等情况就会进该状态，表明线程正处于等待某个资源或条件发生来唤醒自己；
+	Timed_Waiting：执行Thread.sleep(long)、thread.join(long)或obj.wait(long)等就会进该状态，与Waiting的区别在于Timed_Waiting的等待有时间限制；
+	Blocked：如果进入同步方法或同步代码块，没有获取到锁，则会进入该状态；
+	Dead：线程执行完毕，或者抛出了未捕获的异常之后，会进入dead状态，表示该线程结束
+	其次，对于jstack日志，我们要着重关注如下关键信息
+	Deadlock：表示有死锁
+	Waiting on condition：等待某个资源或条件发生来唤醒自己。具体需要结合jstacktrace来分析，比如线程正在sleep，网络读写繁忙而等待
+	Blocked：阻塞
+	Waiting on monitor entry：在等待获取锁
+	in Object.wait()：获取锁后又执行obj.wait()放弃锁
+	对于Waiting on monitor entry 和 in Object.wait()的详细描述：Monitor是 Java中用以实现线程之间的互斥与协作的主要手段，它可以看成是对象或者 Class的锁。每一个对象都有，也仅有一个 monitor。从下图中可以看出，每个 Monitor在某个时刻，只能被一个线程拥有，该线程就是 "Active Thread"，而其它线程都是 "Waiting Thread"，分别在两个队列 " Entry Set"和 "Wait Set"里面等候。在 "Entry Set"中等待的线程状态是 "Waiting for monitor entry"，而在 "Wait Set"中等待的线程状态是 "in Object.wait()"
+jstack主要用来查看某个Java进程内的线程堆栈信息。语法格式如下：
+jstack [option] pid
+jstack [option] executable core
+jstack [option] [server-id@]remote-hostname-or-ip
+    命令行参数选项说明如下：
+
+-l long listings，会打印出额外的锁信息，在发生死锁时可以用jstack -l pid来观察锁持有情况
+-m mixed mode，不仅会输出Java堆栈信息，还会输出C/C++堆栈信息（比如Native方法）
+
+jstack可以定位到线程堆栈，根据堆栈信息我们可以定位到具体代码，所以它在JVM性能调优中使用得非常多。下面我们来一个实例找出某个Java进程中最耗费CPU的Java线程并定位堆栈信息，用到的命令有ps、top、printf、jstack、grep。
+第一步先找出Java进程ID，我部署在服务器上的Java应用名称为mrf-center：
+root@ubuntu:/# ps -ef | grep mrf-center | grep -v grep
+root     21711     1  1 14:47 pts/3    00:02:10 java -jar mrf-center.jar
+得到进程ID为21711，第二步找出该进程内最耗费CPU的线程，可以使用ps -Lfp pid或者ps -mp pid -o THREAD, tid, time或者top -Hp pid，我这里用第三个，输出如下：
+TIME列就是各个Java线程耗费的CPU时间，CPU时间最长的是线程ID为21742的线程，用
+printf "%x\n" 21742  获取十六进制结果
+ 得到21742的十六进制值为54ee，下面会用到。    
+
+    OK，下一步终于轮到jstack上场了，它用来输出进程21711的堆栈信息，然后根据线程ID的十六进制值grep，如下：
+
+root@ubuntu:/# jstack 21711 | grep 54ee
+"PollIntervalRetrySchedulerThread" prio=10 tid=0x00007f950043e000 nid=0x54ee in Object.wait() [0x00007f94c6eda000]
+    可以看到CPU消耗在PollIntervalRetrySchedulerThread这个类的Object.wait()，我找了下我的代码，定位到代码。
+
+
+jps :主要用来输出JVM中运行的进程状态信息。语法格式如下：
+jps [options] [hostid]
+    如果不指定hostid就默认为当前主机或服务器。
+    命令行参数选项说明如下：
+-q 不输出类名、Jar名和传入main方法的参数
+-m 输出传入main方法的参数
+-l 输出main类或Jar的全限名
+-v 输出传入JVM的参数
+
+
+jmap（Memory Map）和jhat（Java Heap Analysis Tool）
+    jmap用来查看堆内存使用状况，一般结合jhat使用。
+    jmap语法格式如下：
+jmap [option] pid
+jmap [option] executable core
+jmap [option] [server-id@]remote-hostname-or-ip
+    如果运行在64位JVM上，可能需要指定-J-d64命令选项参数。
+jmap -permstat pid ：    打印进程的类加载器和类加载器加载的持久代对象信息，输出：类加载器名称、对象是否存活（不可靠）、对象地址、父类加载器、已加载的类大小等信息
+jmap -heap pid ：	查看进程堆内存使用情况，包括使用的GC算法、堆配置参数和各代中堆内存使用情况
+jmap -histo[:live] pid查看堆内存中的对象数目、大小统计直方图，如果带上live则只统计活对象
+	class name是对象类型，说明如下：
+	B  byte
+	C  char
+	D  double
+	F  float
+	I  int
+	J  long
+	Z  boolean
+	[  数组，如[I表示int[]
+	[L+类名 其他对象
+ 
+还有一个很常用的情况是：用jmap把进程内存使用情况dump到文件中，再用jhat分析查看。jmap进行dump命令格式如下：
+jmap -dump:format=b,file=dumpFileName
+	如：
+	epms@linux-z68j:[/home/epms]jmap -dump:format=b,file=/home/epms/dump.dat 3202
+	Dumping heap to /home/epms/dump.dat ...
+	Heap dump file created
+	dump出来的文件可以用MAT、VisualVM等工具查看，这里用jhat查看：
+	jhat -192.168.80.19 9998 /home/epms/dump.dat
+	
+	epms@linux-z68j:[/home/epms] jhat -192.168.80.19 9998 /home/epms/dump.dat
+	Reading from /home/epms/dump.dat...
+	Dump file created Tue Jan 28 17:46:14 CST 2014
+	Snapshot read, resolving...
+	Resolving 132207 objects...
+	Chasing references, expect 26 dots..........................
+	Eliminating duplicate references..........................
+	Snapshot resolved.
+	Started HTTP server on port 9998
+	Server is ready.
+     然后就可以在浏览器中输入主机地址:9998查看了：
+
+
+jstat（JVM统计监测工具）
+epms@linux-z68j:[/home/epms]jstat -gc 3202 250 4
+ S0C    S1C    S0U    S1U      EC       EU        OC         OU       PC     PU    YGC     YGCT    FGC    FGCT     GCT
+1536.0 1536.0  0.0   448.0  239104.0 160960.2  349696.0   115235.9  262144.0 73808.3   1373    9.501   1      0.262    9.763
+1536.0 1536.0  0.0   448.0  239104.0 160960.2  349696.0   115235.9  262144.0 73808.3   1373    9.501   1      0.262    9.763
+1536.0 1536.0  0.0   448.0  239104.0 160960.2  349696.0   115235.9  262144.0 73808.3   1373    9.501   1      0.262    9.763
+1536.0 1536.0  0.0   448.0  239104.0 160960.2  349696.0   115235.9  262144.0 73808.3   1373    9.501   1      0.262    9.763
+如上输出的是GC信息，采样时间间隔为250ms，采样数为4。
+堆内存 = 年轻代 + 年老代 + 永久代
+年轻代 = Eden区 + 两个Survivor区（From和To）
+现在来解释各列含义：
+
+S0C、S1C、S0U、S1U：Survivor 0/1区容量（Capacity）和使用量（Used）
+EC、EU：Eden区容量和使用量
+OC、OU：年老代容量和使用量
+PC、PU：永久代容量和使用量
+YGC、YGT：年轻代GC次数和GC耗时
+FGC、FGCT：Full GC次数和Full GC耗时
+GCT：GC总耗时
+
+
+总结：
+对于jstack日志，我们要着重关注如下关键信息
+Deadlock：表示有死锁
+Waiting on condition：等待某个资源或条件发生来唤醒自己。具体需要结合jstacktrace来分析，比如线程正在sleep，网络读写繁忙而等待
+Blocked：阻塞
+Waiting on monitor entry：在等待获取锁
+如果说系统慢，那么要特别关注Blocked,Waiting on condition
+如果说系统的cpu耗的高，那么肯定是线程执行有死循环，那么此时要关注下Runable状态。
